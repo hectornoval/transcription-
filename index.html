@@ -340,7 +340,7 @@
 
       showProgress('Descargando modelo de reconocimiento de voz…', 0);
       const transcriber = await withTimeout(
-        pipeline('automatic-speech-recognition', 'Xenova/whisper-small', {
+        pipeline('automatic-speech-recognition', 'Xenova/whisper-base', {
           progress_callback: (data) => {
             if (data.status === 'progress' && typeof data.progress === 'number') {
               showProgress(`Descargando modelo (${data.file || ''})…`, data.progress);
@@ -501,6 +501,19 @@
 
       if (!samples || samples.length === 0) {
         throw new Error('El archivo no contiene datos de audio legibles.');
+      }
+
+      const durationMin = samples.length / 16000 / 60;
+      if (durationMin > 6) {
+        const proceed = confirm(
+          `Este audio dura ~${durationMin.toFixed(1)} minutos. En iPhone, archivos largos pueden agotar la memoria de Safari y cerrar la pestaña sin aviso.\n\n` +
+          `Recomendado: dividir la grabación en partes de 5 minutos o menos (podés hacerlo en la app Voice Memos: tocar el clip → editar → recortar) y transcribir cada parte por separado.\n\n` +
+          `¿Continuar de todas formas con el archivo completo?`
+        );
+        if (!proceed) {
+          hideProgress();
+          return;
+        }
       }
 
       const transcriber = await transcriberPromise;
