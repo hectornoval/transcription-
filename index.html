@@ -98,6 +98,7 @@
 // ---- Diagnostics (runs immediately, no module dependency) ----
 function runDiagnostics() {
   const checks = [];
+ const checks = [];
   const out = document.getElementById('diagOutput');
 
   // WebAssembly
@@ -198,6 +199,7 @@ function formatTime(seconds) {
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
   return String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+ return String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
 }
 
 function escapeHtml(t) {
@@ -216,9 +218,9 @@ transcribeBtn.addEventListener('click', async () => {
 
   try {
     if (!modelLoaded) {
-      setStatus('Descargando modelo de IA (~75 MB, modelo "tiny" optimizado para iPad)...', 5);
+      setStatus('Descargando modelo de IA (~250 MB, modelo "small" — mejor calidad para español)...', 5);
 
-      transcriber = await pipelineFn('automatic-speech-recognition', 'Xenova/whisper-tiny', {
+      transcriber = await pipelineFn('automatic-speech-recognition', 'Xenova/whisper-small', {
         progress_callback: (progress) => {
           if (progress.status === 'downloading' && progress.total) {
             const pct = Math.round((progress.loaded / progress.total) * 60);
@@ -231,18 +233,49 @@ transcribeBtn.addEventListener('click', async () => {
       modelLoaded = true;
     }
 
-    setStatus('Leyendo archivo de audio...', 70);
+    setStatus('Decodificando audio (convirtiendo a formato de muestras de audio)...', 68);
+
+    // Decode using AudioContext to get raw PCM samples — more reliable than
+    // passing the raw arrayBuffer/Blob directly to the pipeline, especially
+    // for compressed formats like M4A/AAC on Safari/iPadOS.
     const arrayBuffer = await audioFile.arrayBuffer();
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    let decodedBuffer;
+    try {
+      decodedBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+    } catch (decodeErr) {
+      console.error('decodeAudioData failed:', decodeErr);
+      throw new Error('No se pudo decodificar el audio (' + (decodeErr.message || decodeErr) + '). El formato M4A podría no ser compatible con la decodificación del navegador.');
+    }
 
-    setStatus('Transcribiendo audio en español (puede tardar varios minutos)...', 75);
+    // Resample to 16kHz mono Float32Array, which is what Whisper expects
+    const targetRate = 16000;
+    let samples;
+    if (decodedBuffer.sampleRate === targetRate && decodedBuffer.numberOfChannels === 1) {
+      samples = decodedBuffer.getChannelData(0);
+    } else {
+      const offlineCtx = new OfflineAudioContext(1, Math.ceil(decodedBuffer.duration * targetRate), targetRate);
+      const src = offlineCtx.createBufferSource();
+      src.buffer = decodedBuffer;
+      src.connect(offlineCtx.destination);
+      src.start();
+      const rendered = await offlineCtx.startRendering();
+      samples = rendered.getChannelData(0);
+    }
+    await audioCtx.close();
 
-    const result = await transcriber(arrayBuffer, {
+    console.log('Decoded audio: duration=', decodedBuffer.duration, 'samples=', samples.length, 'sampleRate target=', targetRate);
+    setStatus('Audio decodificado (' + Math.round(decodedBuffer.duration) + 's). Transcribiendo en español (puede tardar varios minutos)...', 75);
+
+    const result = await transcriber(samples, {
       language: 'spanish',
       task: 'transcribe',
       return_timestamps: true,
       chunk_length_s: 30,
       stride_length_s: 5,
     });
+
+    console.log('Transcription result:', result);
 
     setStatus('Procesando resultado...', 95);
     displayTranscript(result, audioFile.name);
@@ -266,12 +299,15 @@ function displayTranscript(result, filename) {
 
   document.getElementById('legalFile').textContent = filename;
   document.getElementById('legalDate').textContent = new Date().toLocaleString('es-ES');
+ \const chunks = result.chunks || [];
+  const fullText = (result.text || '').trim();
 
-  const chunks = result.chunks || [];
-
-  if (chunks.length === 0) {
-    content.innerHTML = '<div class="chunk"><div class="chunk-text">' + escapeHtml(result.text || '(Sin resultado)') + '</div></div>';
-    allSegments.push({ text: result.text || '', label: 'Completo' });
+  if (chunks.length === 0 || fullText.length === 0) {
+    const msg = fullText.length === 0
+      ? '⚠️ El modelo no detectó texto en el audio. Posibles causas: el audio es muy silencioso, el formato no se decodificó bien, o el modelo tuvo problemas con este contenido. Revise la consola del navegador (Compartir → Inspeccionar, o conecte a Mac con Web Inspector) para más detalles, o intente con un fragmento más corto del audio.'
+      : escapeHtml(fullText);
+    content.innerHTML = '<div class="chunk"><div class="chunk-text">' + msg + '</div></div>';
+    allSegments.push({ text: fullText, label: 'Completo' });
     return;
   }
 
